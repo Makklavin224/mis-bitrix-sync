@@ -1,13 +1,14 @@
 /**
  * POST /api/sync?date_from=01.03.2026&date_to=19.03.2026
+ * POST /api/sync?date_from=01.03.2026&date_to=19.03.2026&offset=100&limit=100
  *
  * Импорт визитов из МИС Реновация → Битрикс24
  *
- * Для каждого визита:
- *   1. Определяет сценарий (по статусу + наличию плана лечения)
- *   2. Ищет контакт в Битриксе по телефону — если нет, создаёт
- *   3. Если есть открытые сделки → обновляет (стадия + поля)
- *   4. Если НЕТ открытых сделок → создаёт новую сделку
+ * Пагинация: offset + limit (по умолчанию 0 + 200).
+ * Если записей больше чем limit — в ответе будет next_offset для следующего вызова.
+ *
+ * Услуги: НАКАПЛИВАЮТСЯ по всем визитам пациента (не перезаписываются).
+ * Оплата: getTotalPaid всегда берёт актуальную сумму из МИС.
  */
 
 const MIS_BASE = 'https://app.rnova.org/api/public';
@@ -26,18 +27,20 @@ export default async function handler(req, res) {
 
   const dateFrom = req.query.date_from || req.body?.date_from;
   const dateTo = req.query.date_to || req.body?.date_to;
+  const offset = parseInt(req.query.offset || '0') || 0;
+  const limit = parseInt(req.query.limit || '200') || 200;
 
   if (!dateFrom || !dateTo) {
     return res.status(400).json({
       error: 'date_from and date_to required',
-      example: 'POST /api/sync?date_from=01.03.2026&date_to=19.03.2026',
+      example: 'POST /api/sync?date_from=01.03.2026&date_to=19.03.2026&offset=0&limit=200',
     });
   }
 
-  console.log(`[sync] start: ${dateFrom} → ${dateTo}`);
+  console.log(`[sync] start: ${dateFrom} → ${dateTo}, offset=${offset}, limit=${limit}`);
 
   try {
-    const result = await runSync(BITRIX_URL, MIS_API_KEY, dateFrom, dateTo);
+    const result = await runSync(BITRIX_URL, MIS_API_KEY, dateFrom, dateTo, offset, limit);
     return res.status(200).json(result);
   } catch (err) {
     console.error('[sync] critical error:', err.message);
@@ -49,77 +52,109 @@ export default async function handler(req, res) {
 //  Главный цикл
 // =====================================================================
 
-async function runSync(BITRIX_URL, MIS_API_KEY, dateFrom, dateTo) {
-  const ctx = { BITRIX_URL, MIS_API_KEY, _bitrixQueue: Promise.resolve(), _dealFieldsCache: null, _templateCache: null, _categoryCache: null };
+async function runSync(BITRIX_URL, MIS_API_KEY, dateFrom, dateTo, offset, limit) {
+  const ctx = { BITRIX_URL, MIS_API_KEY, _dealFieldsCache: null, _templateCache: null, _categoryCache: null };
 
   // 1. Визиты из МИС
   console.log('[sync] fetching appointments...');
-  const appointments = await getAppointments(ctx, dateFrom, dateTo);
-  console.log(`[sync] found ${appointments.length} appointments`);
+  const allAppointments = await getAppointments(ctx, dateFrom, dateTo);
+  console.log(`[sync] total from MIS: ${allAppointments.length}`);
 
-  if (!appointments.length) {
+  if (!allAppointments.length) {
     return { ok: true, message: 'no appointments', stats: {} };
   }
 
   // 2. Хронологический порядок
-  appointments.sort((a, b) => (a.time_start || '').localeCompare(b.time_start || ''));
+  allAppointments.sort((a, b) => (a.time_start || '').localeCompare(b.time_start || ''));
 
   // 3. Только нужные статусы
-  const relevant = appointments.filter(a =>
+  const allRelevant = allAppointments.filter(a =>
     a.status === 'upcoming' || a.status === 'completed' || a.status === 'refused'
   );
 
-  console.log(`[sync] relevant: ${relevant.length}`);
+  // 4. Пагинация
+  const batch = allRelevant.slice(offset, offset + limit);
+  const hasMore = offset + limit < allRelevant.length;
 
-  // 4. Обработка
-  const stats = { total: relevant.length, created: 0, updated: 0, already: 0, skipped: 0, errors: 0, contactsCreated: 0 };
+  console.log(`[sync] relevant: ${allRelevant.length}, batch: ${offset}..${offset + batch.length}`);
+
+  // 5. Группируем визиты по пациенту (patient_id) — чтобы собрать ВСЕ услуги
+  const byPatient = new Map();
+  for (const apt of allRelevant) {
+    const pid = apt.patient_id;
+    if (!pid) continue;
+    if (!byPatient.has(pid)) byPatient.set(pid, []);
+    byPatient.get(pid).push(apt);
+  }
+
+  // 6. Обработка батча
+  const stats = { total_in_mis: allRelevant.length, batch_offset: offset, batch_size: batch.length, created: 0, updated: 0, already: 0, skipped: 0, errors: 0, contactsCreated: 0 };
   const log = [];
   const errors = [];
 
-  for (let i = 0; i < relevant.length; i++) {
-    const apt = relevant[i];
+  for (let i = 0; i < batch.length; i++) {
+    const apt = batch[i];
     const name = apt.patient_name || '?';
     const phone = apt.patient_phone || '—';
 
     try {
-      const result = await syncOne(ctx, apt);
+      // Собираем ВСЕ услуги по всем визитам этого пациента
+      const patientVisits = byPatient.get(apt.patient_id) || [];
+      const allServices = [];
+      for (const v of patientVisits) {
+        if (v.services?.length) allServices.push(...v.services);
+      }
+
+      const result = await syncOne(ctx, apt, allServices);
 
       if (result.status === 'created') {
         stats.created++;
         if (result.contactCreated) stats.contactsCreated++;
-        log.push({ i: i + 1, name, phone, action: 'created', dealId: result.dealId, scenario: result.scenario, contactCreated: result.contactCreated || false });
-        console.log(`[sync] ${i + 1}/${relevant.length} ${name} → CREATED deal #${result.dealId} [${result.scenario}]${result.contactCreated ? ' +contact' : ''}`);
+        log.push({ i: offset + i + 1, name, phone, action: 'created', dealId: result.dealId, scenario: result.scenario, contactCreated: result.contactCreated || false });
+        console.log(`[sync] ${offset + i + 1} ${name} → CREATED #${result.dealId} [${result.scenario}]${result.contactCreated ? ' +contact' : ''}`);
       } else if (result.status === 'updated') {
         const hasRealUpdate = result.deals.some(d => d.action !== 'already_at_stage');
         if (hasRealUpdate) {
           stats.updated++;
-          log.push({ i: i + 1, name, phone, action: 'updated', deals: result.deals, scenario: result.scenario });
+          log.push({ i: offset + i + 1, name, phone, action: 'updated', deals: result.deals, scenario: result.scenario });
         } else {
           stats.already++;
-          log.push({ i: i + 1, name, phone, action: 'already', deals: result.deals });
+          log.push({ i: offset + i + 1, name, phone, action: 'already', deals: result.deals });
         }
-        console.log(`[sync] ${i + 1}/${relevant.length} ${name} → ${hasRealUpdate ? 'UPDATED' : 'already ok'}`);
+        console.log(`[sync] ${offset + i + 1} ${name} → ${hasRealUpdate ? 'UPDATED' : 'ok'}`);
       } else if (result.status === 'skip') {
         stats.skipped++;
-        log.push({ i: i + 1, name, phone, action: 'skipped', reason: result.reason });
+        log.push({ i: offset + i + 1, name, phone, action: 'skipped', reason: result.reason });
       }
     } catch (err) {
       stats.errors++;
-      errors.push({ i: i + 1, name, phone, error: err.message });
-      console.error(`[sync] ${i + 1}/${relevant.length} ${name} — ERROR: ${err.message}`);
+      errors.push({ i: offset + i + 1, name, phone, error: err.message });
+      console.error(`[sync] ${offset + i + 1} ${name} — ERROR: ${err.message}`);
     }
   }
 
-  console.log(`[sync] done: created=${stats.created}, updated=${stats.updated}, already=${stats.already}, skipped=${stats.skipped}, errors=${stats.errors}, contacts=${stats.contactsCreated}`);
+  console.log(`[sync] batch done: created=${stats.created}, updated=${stats.updated}, already=${stats.already}, skipped=${stats.skipped}, errors=${stats.errors}`);
 
-  return { ok: true, stats, log, errors };
+  const result = { ok: true, stats, errors };
+
+  if (hasMore) {
+    result.next_offset = offset + limit;
+    result.next_url = `/api/sync?date_from=${dateFrom}&date_to=${dateTo}&offset=${offset + limit}&limit=${limit}`;
+  } else {
+    result.complete = true;
+  }
+
+  // Не отдаём лог целиком если > 50 записей (тяжело)
+  if (log.length <= 50) result.log = log;
+
+  return result;
 }
 
 // =====================================================================
 //  Обработка одного визита
 // =====================================================================
 
-async function syncOne(ctx, apt) {
+async function syncOne(ctx, apt, allPatientServices) {
   const rawPhone = apt.patient_phone;
   if (!rawPhone) return { status: 'skip', reason: 'no_phone' };
 
@@ -162,7 +197,7 @@ async function syncOne(ctx, apt) {
   // 6. Поля сделки
   const extraFields = await buildDealFields(ctx, targetStage, apt, planData, doctorListId, includePlanFields);
 
-  // 7. Сумма оплат
+  // 7. Сумма оплат — АКТУАЛЬНАЯ из МИС (за все визиты)
   const totalPaid = await getTotalPaid(ctx, apt.patient_id);
   if (totalPaid > 0) extraFields['UF_CRM_1770381244477'] = String(totalPaid);
 
@@ -174,7 +209,8 @@ async function syncOne(ctx, apt) {
       fields: { STAGE_ID: targetStage, CONTACT_ID: contactId, TITLE: `${apt.patient_name || 'Пациент'} — ${scenario}`, ...extraFields },
     });
     const dealId = r?.result;
-    if (apt.services?.length && dealId) await setDealProducts(ctx, dealId, apt.services);
+    // Услуги — ВСЕ по пациенту (итоговые)
+    if (allPatientServices.length && dealId) await setDealProducts(ctx, dealId, allPatientServices);
     return { status: 'created', dealId, stage: targetStage, scenario, contactCreated, contactId };
   }
 
@@ -184,11 +220,13 @@ async function syncOne(ctx, apt) {
       if (Object.keys(extraFields).length) {
         await bitrix(ctx, 'crm.deal.update', { id: deal.ID, fields: extraFields });
       }
+      // Услуги — обновляем итоговые даже если стадия не менялась
+      if (allPatientServices.length) await setDealProducts(ctx, deal.ID, allPatientServices);
       results.push({ dealId: deal.ID, action: 'already_at_stage' });
       continue;
     }
     await bitrix(ctx, 'crm.deal.update', { id: deal.ID, fields: { STAGE_ID: targetStage, ...extraFields } });
-    if (apt.services?.length) await setDealProducts(ctx, deal.ID, apt.services);
+    if (allPatientServices.length) await setDealProducts(ctx, deal.ID, allPatientServices);
     results.push({ dealId: deal.ID, action: 'moved', from: deal.STAGE_ID, to: targetStage });
   }
 
@@ -351,24 +389,36 @@ function mapPlanToFields(planTitle, direction) {
 }
 
 // =====================================================================
-//  Битрикс24 API
+//  Битрикс24 API — с retry при rate limit
 // =====================================================================
 
 async function bitrix(ctx, method, params) {
-  const result = await new Promise((resolve, reject) => {
-    ctx._bitrixQueue = ctx._bitrixQueue.then(async () => {
-      await sleep(500);
-      try {
-        const url = `${ctx.BITRIX_URL.replace(/\/$/, '')}/${method}`;
-        const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(params) });
-        if (!r.ok) throw new Error(`Bitrix ${method}: ${r.status}`);
-        const data = await r.json();
-        if (data.error) throw new Error(`Bitrix ${method}: ${data.error} — ${data.error_description}`);
-        resolve(data);
-      } catch (err) { reject(err); }
+  const url = `${ctx.BITRIX_URL.replace(/\/$/, '')}/${method}`;
+
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const r = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params),
     });
-  });
-  return result;
+
+    if (!r.ok) throw new Error(`Bitrix ${method}: ${r.status}`);
+
+    const data = await r.json();
+
+    // Rate limit — ждём и повторяем
+    if (data.error === 'QUERY_LIMIT_EXCEEDED') {
+      console.log(`[bitrix] rate limit on ${method}, waiting ${(attempt + 1) * 2}s...`);
+      await sleep((attempt + 1) * 2000);
+      continue;
+    }
+
+    if (data.error) throw new Error(`Bitrix ${method}: ${data.error} — ${data.error_description}`);
+
+    return data;
+  }
+
+  throw new Error(`Bitrix ${method}: rate limit exceeded after 5 retries`);
 }
 
 async function findContact(ctx, normalizedPhone) {
