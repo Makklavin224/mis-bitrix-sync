@@ -488,20 +488,7 @@ async function findIndicationId(ctx, indText) { return findListItemId((await get
 
 async function setDealProducts(ctx, dealId, services) {
   if (!services?.length) return;
-
-  // Дедупликация: одинаковые услуги (по title) → одна строка, количество суммируется
-  const map = new Map();
-  for (const s of services) {
-    if (!s.title || !s.price) continue;
-    const key = s.title;
-    if (map.has(key)) {
-      map.get(key).qty += parseInt(s.count) || 1;
-    } else {
-      map.set(key, { title: s.title, price: parseFloat(s.price) || 0, qty: parseInt(s.count) || 1 });
-    }
-  }
-
-  const rows = [...map.values()].map(s => ({ PRODUCT_NAME: s.title, PRICE: s.price, QUANTITY: s.qty }));
+  const rows = services.filter(s => s.title && s.price).map(s => ({ PRODUCT_NAME: s.title, PRICE: parseFloat(s.price) || 0, QUANTITY: parseInt(s.count) || 1 }));
   if (rows.length) await bitrix(ctx, 'crm.deal.productrows.set', { id: dealId, rows });
 }
 
