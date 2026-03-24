@@ -6,7 +6,9 @@
     "migrate:dry": "node migrate-doctor-field.js",
     "migrate": "DRY_RUN=0 node migrate-doctor-field.js",
     "cleanup:dry": "node cleanup.js",
-    "cleanup": "DRY_RUN=0 node cleanup.js"
+    "cleanup": "DRY_RUN=0 node cleanup.js",
+    "audit": "node audit-stages.js",
+    "audit:fix": "DRY_RUN=0 node audit-stages.js"
   },
   "dependencies": {
     "dotenv": "^16.4.5"
