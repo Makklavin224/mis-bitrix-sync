@@ -60,22 +60,29 @@ let bitrixCalls = 0;
 
 async function bitrix(method, params, attempt = 1) {
   const url = `${BITRIX_URL.replace(/\/$/, '')}/${method}`;
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(params),
-  });
-  const data = await res.json();
-  bitrixCalls++;
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params),
+    });
+    const data = await res.json();
+    bitrixCalls++;
 
-  if (data.error === 'QUERY_LIMIT_EXCEEDED' && attempt <= 3) {
-    console.log(`\n  [rate limit] пауза 2с... (попытка ${attempt}/3)`);
-    await sleep(2000);
-    return bitrix(method, params, attempt + 1);
+    if (data.error === 'QUERY_LIMIT_EXCEEDED' && attempt <= 5) {
+      await sleep(1000 * attempt);
+      return bitrix(method, params, attempt + 1);
+    }
+
+    if (data.error) throw new Error(`Bitrix ${method}: ${data.error} — ${data.error_description}`);
+    return data;
+  } catch (err) {
+    if (attempt <= 5) {
+      await sleep(1000 * attempt);
+      return bitrix(method, params, attempt + 1);
+    }
+    throw err;
   }
-
-  if (data.error) throw new Error(`Bitrix ${method}: ${data.error} — ${data.error_description}`);
-  return data;
 }
 
 async function misPost(method, params) {
@@ -308,7 +315,6 @@ async function main() {
       noPhone++;
       continue;
     }
-    await sleep(500);
 
     // Телефон → пациент МИС
     const patientId = await findPatientByPhone(phone);
@@ -316,15 +322,12 @@ async function main() {
       noPatient++;
       continue;
     }
-    await sleep(300);
 
     // Проверить товары на контрольные приёмы
     const products = await checkDealProducts(deal.ID);
-    await sleep(500);
 
     // Проверить план и записи
     const plan = await checkPlan(patientId);
-    await sleep(300);
 
     const upcoming = await getUpcomingAppointments(patientId);
     await sleep(100);
