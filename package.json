@@ -3,8 +3,10 @@
   "version": "2.0.0",
   "type": "module",
   "scripts": {
-    "dry": "node cleanup.js",
-    "run": "DRY_RUN=0 node cleanup.js"
+    "migrate:dry": "node migrate-doctor-field.js",
+    "migrate": "DRY_RUN=0 node migrate-doctor-field.js",
+    "cleanup:dry": "node cleanup.js",
+    "cleanup": "DRY_RUN=0 node cleanup.js"
   },
   "dependencies": {
     "dotenv": "^16.4.5"
