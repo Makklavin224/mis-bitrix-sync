@@ -87,6 +87,29 @@ function fmtDate(d) {
 }
 function addDays(d, n) { const r = new Date(d); r.setDate(r.getDate() + n); return r; }
 
+// Товары-триггеры завершения лечения
+const TREATMENT_COMPLETE_KEYWORDS = [
+  'повторный прием 2-й день',
+  'повторный прием на 2-ой день',
+  'повторный прием на 7-ой день',
+  'повторный прием на 45-й день',
+  'контрольный осмотр после лечения',
+];
+
+/** Проверить товары сделки на наличие контрольных приёмов */
+async function checkDealProducts(dealId) {
+  const res = await bitrix('crm.deal.productrows.get', { id: dealId });
+  const products = res?.result || [];
+
+  for (const p of products) {
+    const title = (p.PRODUCT_NAME || '').toLowerCase();
+    if (TREATMENT_COMPLETE_KEYWORDS.some(kw => title.includes(kw))) {
+      return { found: true, title: p.PRODUCT_NAME };
+    }
+  }
+  return { found: false };
+}
+
 // ===== Загрузка данных =====
 
 async function getAllDeals() {
@@ -208,9 +231,12 @@ async function getUpcomingAppointments(patientId) {
 
 // ===== Определение правильной стадии =====
 
-function determineCorrectStage(currentStage, hasPlan, hasUpcoming) {
+function determineCorrectStage(currentStage, hasPlan, hasUpcoming, hasTreatmentCompleteProduct) {
   // Терминальные — не трогаем
   if (CLOSED_STAGES.includes(currentStage)) return currentStage;
+
+  // Товар контрольного/повторного приёма → лечение завершено
+  if (hasTreatmentCompleteProduct) return 'UC_F92MOY';
 
   // "Не пришёл" стадии — если есть будущая запись, значит перезаписался
   if (currentStage === 'UC_QAU8BB' || currentStage === 'UC_1HMFHN') {
@@ -281,6 +307,10 @@ async function main() {
     }
     await sleep(100);
 
+    // Проверить товары на контрольные приёмы
+    const products = await checkDealProducts(deal.ID);
+    await sleep(100);
+
     // Проверить план и записи
     const plan = await checkPlan(patientId);
     await sleep(100);
@@ -288,7 +318,7 @@ async function main() {
     const upcoming = await getUpcomingAppointments(patientId);
     await sleep(100);
 
-    const correctStage = determineCorrectStage(deal.STAGE_ID, plan.found, upcoming.length > 0);
+    const correctStage = determineCorrectStage(deal.STAGE_ID, plan.found, upcoming.length > 0, products.found);
 
     if (correctStage !== deal.STAGE_ID) {
       const amount = parseFloat(deal.OPPORTUNITY) || 0;
@@ -301,6 +331,8 @@ async function main() {
         correctStage,
         hasPlan: plan.found,
         planTitle: plan.title || '',
+        hasCompleteProduct: products.found,
+        completeProductTitle: products.title || '',
         upcomingCount: upcoming.length,
         nextDate: upcoming[0]?.time_start || '',
       });
@@ -336,8 +368,9 @@ async function main() {
       for (const issue of typeIssues.slice(0, 10)) {
         const planInfo = issue.hasPlan ? `план: "${issue.planTitle}"` : 'нет плана';
         const upInfo = issue.upcomingCount ? `записей: ${issue.upcomingCount}, ближ: ${issue.nextDate}` : 'нет записей';
+        const prodInfo = issue.hasCompleteProduct ? `товар: "${issue.completeProductTitle}"` : '';
         console.log(`    #${issue.dealId} "${issue.title}" | ${issue.doctor} | ${issue.amount.toLocaleString('ru-RU')} ₽`);
-        console.log(`      ${planInfo} | ${upInfo}`);
+        console.log(`      ${planInfo} | ${upInfo}${prodInfo ? ' | ' + prodInfo : ''}`);
       }
       if (typeIssues.length > 10) {
         console.log(`    ... и ещё ${typeIssues.length - 10} сделок`);
