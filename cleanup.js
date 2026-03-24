@@ -67,7 +67,7 @@ async function getAllDeals() {
   while (true) {
     const res = await bitrix('crm.deal.list', {
       filter: { CLOSED: 'N' },
-      select: ['ID', 'TITLE', 'STAGE_ID', 'CONTACT_ID', 'UF_CRM_1770366173566'],
+      select: ['ID', 'TITLE', 'STAGE_ID', 'CONTACT_ID', 'UF_CRM_1774345475'],
       start,
     });
 
@@ -86,11 +86,6 @@ async function getAllDeals() {
 async function getDealProducts(dealId) {
   const res = await bitrix('crm.deal.productrows.get', { id: dealId });
   return res?.result || [];
-}
-
-async function getDealFields() {
-  const res = await bitrix('crm.deal.fields', {});
-  return res?.result || {};
 }
 
 // ===== МИС API =====
@@ -193,20 +188,7 @@ async function main() {
   const doctors = await loadDoctors();
   console.log(`  Загружено ${doctors.byName.size} врачей\n`);
 
-  console.log('[2/5] Загрузка полей сделок из Битрикса...');
-  const dealFields = await getDealFields();
-  const doctorItems = dealFields['UF_CRM_1770366173566']?.items || [];
-
-  const bitrixToMis = new Map();
-  for (const item of doctorItems) {
-    const misDoc = doctors.byName.get(item.VALUE?.trim());
-    if (misDoc) {
-      bitrixToMis.set(String(item.ID), { misId: misDoc.id, name: item.VALUE.trim() });
-    }
-  }
-  console.log(`  Сопоставлено ${bitrixToMis.size} врачей Битрикс <-> МИС\n`);
-
-  console.log('[3/5] Загрузка открытых сделок...');
+  console.log('[2/4] Загрузка открытых сделок...');
   const allDeals = await getAllDeals();
   console.log(`  Всего открытых сделок: ${allDeals.length}\n`);
 
@@ -220,7 +202,7 @@ async function main() {
   console.log(`  Контактов с открытыми сделками: ${byContact.size}\n`);
 
   // 3. Поиск и удаление дублей
-  console.log('[4/5] Поиск дублей...\n');
+  console.log('[3/4] Поиск дублей...\n');
 
   let stats = { duplicates: 0, deleted: 0, mergedProducts: 0, stageFixed: 0, dateFixed: 0 };
 
@@ -232,23 +214,23 @@ async function main() {
     const clusters = [];
 
     for (const deal of activeDeals) {
-      const docListId = deal.UF_CRM_1770366173566;
-      const docInfo = docListId ? bitrixToMis.get(String(docListId)) : null;
+      const docName = (deal.UF_CRM_1774345475 || '').trim();
+      const docMis = docName ? doctors.byName.get(docName) : null;
 
       let placed = false;
       for (const cluster of clusters) {
-        const clusterDocListId = cluster[0].UF_CRM_1770366173566;
-        const clusterDocInfo = clusterDocListId ? bitrixToMis.get(String(clusterDocListId)) : null;
+        const clusterDocName = (cluster[0].UF_CRM_1774345475 || '').trim();
+        const clusterDocMis = clusterDocName ? doctors.byName.get(clusterDocName) : null;
 
         // Точное совпадение врача
-        if (docListId && String(docListId) === String(clusterDocListId)) {
+        if (docName && docName === clusterDocName) {
           cluster.push(deal);
           placed = true;
           break;
         }
 
         // Совпадение по специальности
-        if (docInfo && clusterDocInfo && sharesSpecialty(doctors, docInfo.misId, clusterDocInfo.misId)) {
+        if (docMis && clusterDocMis && sharesSpecialty(doctors, docMis.id, clusterDocMis.id)) {
           cluster.push(deal);
           placed = true;
           break;
@@ -266,13 +248,13 @@ async function main() {
 
       const keep = cluster[0];
       const dups = cluster.slice(1);
-      const keepDoc = bitrixToMis.get(String(keep.UF_CRM_1770366173566))?.name || '?';
+      const keepDoc = keep.UF_CRM_1774345475 || '?';
 
       console.log(`  Контакт ${contactId} | ${keepDoc}`);
       console.log(`    Оставляем: #${keep.ID} "${keep.TITLE}" [${keep.STAGE_ID}]`);
 
       for (const dup of dups) {
-        const dupDoc = bitrixToMis.get(String(dup.UF_CRM_1770366173566))?.name || '?';
+        const dupDoc = dup.UF_CRM_1774345475 || '?';
         console.log(`    Дубль:     #${dup.ID} "${dup.TITLE}" [${dup.STAGE_ID}] врач=${dupDoc}`);
         stats.duplicates++;
 
@@ -308,15 +290,7 @@ async function main() {
 
   // 4. Пройтись по оставшимся сделкам: проверить стадии и даты
   // Перезагружаем сделки после удаления дублей
-  if (!DRY_RUN && stats.deleted > 0) {
-    console.log('[5/5] Перезагрузка сделок после очистки и проверка стадий...\n');
-  } else {
-    console.log('[5/5] Проверка стадий и дат записей...\n');
-  }
-
-  // Для проверки стадий нужно знать patient_id, но его нет в сделке.
-  // Это можно делать только при наличии данных из вебхуков.
-  // Пока пропускаем — стадии будут обновлены при следующем вебхуке от МИС.
+  console.log('[4/4] Готово.\n');
   console.log('  Стадии будут скорректированы автоматически при следующем вебхуке от МИС.\n');
 
   // 5. Итог
