@@ -58,7 +58,7 @@ console.log(`${'='.repeat(55)}\n`);
 
 let bitrixCalls = 0;
 
-async function bitrix(method, params) {
+async function bitrix(method, params, attempt = 1) {
   const url = `${BITRIX_URL.replace(/\/$/, '')}/${method}`;
   const res = await fetch(url, {
     method: 'POST',
@@ -67,6 +67,13 @@ async function bitrix(method, params) {
   });
   const data = await res.json();
   bitrixCalls++;
+
+  if (data.error === 'QUERY_LIMIT_EXCEEDED' && attempt <= 3) {
+    console.log(`\n  [rate limit] пауза 2с... (попытка ${attempt}/3)`);
+    await sleep(2000);
+    return bitrix(method, params, attempt + 1);
+  }
+
   if (data.error) throw new Error(`Bitrix ${method}: ${data.error} — ${data.error_description}`);
   return data;
 }
@@ -301,7 +308,7 @@ async function main() {
       noPhone++;
       continue;
     }
-    await sleep(100);
+    await sleep(500);
 
     // Телефон → пациент МИС
     const patientId = await findPatientByPhone(phone);
@@ -309,15 +316,15 @@ async function main() {
       noPatient++;
       continue;
     }
-    await sleep(100);
+    await sleep(300);
 
     // Проверить товары на контрольные приёмы
     const products = await checkDealProducts(deal.ID);
-    await sleep(100);
+    await sleep(500);
 
     // Проверить план и записи
     const plan = await checkPlan(patientId);
-    await sleep(100);
+    await sleep(300);
 
     const upcoming = await getUpcomingAppointments(patientId);
     await sleep(100);
