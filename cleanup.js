@@ -40,6 +40,21 @@ const STAGE_NAMES = {
 };
 function sn(id) { return STAGE_NAMES[id] || id; }
 
+// Приоритет стадий: чем выше число — тем важнее, оставляем при дедупликации
+const STAGE_PRIORITY = {
+  'NEW': 0,
+  'PREPARATION': 1,
+  'EXECUTING': 2,
+  'PREPAYMENT_INVOICE': 3,
+  'FINAL_INVOICE': 10,         // записан на консультацию
+  'UC_1HMFHN': 11,             // не пришёл на консультацию
+  'UC_LVYHC1': 12,             // нет показаний
+  'UC_QAU8BB': 13,             // не пришёл на лечение
+  'UC_7KB49S': 14,             // есть показания к лечению
+  'UC_JLJ6EI': 15,             // записан на лечение
+};
+function stagePriority(stageId) { return STAGE_PRIORITY[stageId] ?? 5; }
+
 const BITRIX_URL = process.env.BITRIX_WEBHOOK_URL;
 const MIS_API_KEY = process.env.MIS_API_KEY;
 const DRY_RUN = process.env.DRY_RUN !== '0';
@@ -267,6 +282,9 @@ async function main() {
     // Обработка кластеров с дублями
     for (const cluster of clusters) {
       if (cluster.length <= 1) continue;
+
+      // Сортируем: продвинутые стадии первыми, ранние (NEW и пр.) — в конец на удаление
+      cluster.sort((a, b) => stagePriority(b.STAGE_ID) - stagePriority(a.STAGE_ID));
 
       const keep = cluster[0];
       const dups = cluster.slice(1);
