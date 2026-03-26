@@ -266,9 +266,11 @@ async function main() {
           break;
         }
 
-        // Сделка без врача ИЛИ в ранней стадии → дубль любой существующей сделки контакта
+        // Любая из сторон без врача или в ранней стадии → объединяем
         const EARLY = ['NEW', 'PREPARATION', 'EXECUTING', 'PREPAYMENT_INVOICE'];
-        if ((!docName || EARLY.includes(deal.STAGE_ID)) && clusters.length > 0) {
+        const dealEarly = !docName || EARLY.includes(deal.STAGE_ID);
+        const clusterEarly = !clusterDocName || EARLY.includes(cluster[0].STAGE_ID);
+        if (dealEarly || clusterEarly) {
           cluster.push(deal);
           placed = true;
           break;
