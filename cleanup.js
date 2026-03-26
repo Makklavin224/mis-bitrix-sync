@@ -25,6 +25,21 @@ import 'dotenv/config';
 const MIS_BASE = 'https://app.rnova.org/api/public';
 const CLOSED_STAGES = ['UC_NCW0DT', 'UC_F92MOY', 'WON', 'LOSE', 'APOLOGY'];
 
+const STAGE_NAMES = {
+  'NEW': 'Новая',
+  'PREPARATION': 'Подготовка',
+  'EXECUTING': 'В работе',
+  'PREPAYMENT_INVOICE': 'Предоплата',
+  'FINAL_INVOICE': 'Записан на консультацию',
+  'UC_JLJ6EI': 'Записан на лечение',
+  'UC_7KB49S': 'Есть показания',
+  'UC_LVYHC1': 'Нет показаний',
+  'UC_QAU8BB': 'Не пришёл (лечение)',
+  'UC_1HMFHN': 'Не пришёл (консультация)',
+  'UC_F92MOY': 'Лечение завершено',
+};
+function sn(id) { return STAGE_NAMES[id] || id; }
+
 const BITRIX_URL = process.env.BITRIX_WEBHOOK_URL;
 const MIS_API_KEY = process.env.MIS_API_KEY;
 const DRY_RUN = process.env.DRY_RUN !== '0';
@@ -235,6 +250,13 @@ async function main() {
           placed = true;
           break;
         }
+
+        // Сделка без врача → дубль любой существующей сделки контакта
+        if (!docName && clusters.length > 0) {
+          cluster.push(deal);
+          placed = true;
+          break;
+        }
       }
 
       if (!placed) {
@@ -251,11 +273,11 @@ async function main() {
       const keepDoc = keep.UF_CRM_1774345475 || '?';
 
       console.log(`  Контакт ${contactId} | ${keepDoc}`);
-      console.log(`    Оставляем: #${keep.ID} "${keep.TITLE}" [${keep.STAGE_ID}]`);
+      console.log(`    Оставляем: #${keep.ID} "${keep.TITLE}" [${sn(keep.STAGE_ID)}]`);
 
       for (const dup of dups) {
-        const dupDoc = dup.UF_CRM_1774345475 || '?';
-        console.log(`    Дубль:     #${dup.ID} "${dup.TITLE}" [${dup.STAGE_ID}] врач=${dupDoc}`);
+        const dupDoc = dup.UF_CRM_1774345475 || '(без врача)';
+        console.log(`    Дубль:     #${dup.ID} "${dup.TITLE}" [${sn(dup.STAGE_ID)}] врач=${dupDoc}`);
         stats.duplicates++;
 
         if (!DRY_RUN) {
