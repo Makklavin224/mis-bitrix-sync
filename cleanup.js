@@ -97,7 +97,7 @@ console.log(`${'='.repeat(50)}\n`);
 
 let bitrixCalls = 0;
 
-async function bitrix(method, params) {
+async function bitrix(method, params, attempt = 1) {
   const url = `${BITRIX_URL.replace(/\/$/, '')}/${method}`;
   const res = await fetch(url, {
     method: 'POST',
@@ -106,6 +106,11 @@ async function bitrix(method, params) {
   });
   const data = await res.json();
   bitrixCalls++;
+
+  if (data.error === 'QUERY_LIMIT_EXCEEDED' && attempt <= 5) {
+    await sleep(1000 * attempt);
+    return bitrix(method, params, attempt + 1);
+  }
 
   if (data.error) {
     throw new Error(`Bitrix ${method}: ${data.error} — ${data.error_description}`);
