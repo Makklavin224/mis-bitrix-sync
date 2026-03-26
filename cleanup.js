@@ -266,8 +266,9 @@ async function main() {
           break;
         }
 
-        // Сделка без врача → дубль любой существующей сделки контакта
-        if (!docName && clusters.length > 0) {
+        // Сделка без врача ИЛИ в ранней стадии → дубль любой существующей сделки контакта
+        const EARLY = ['NEW', 'PREPARATION', 'EXECUTING', 'PREPAYMENT_INVOICE'];
+        if ((!docName || EARLY.includes(deal.STAGE_ID)) && clusters.length > 0) {
           cluster.push(deal);
           placed = true;
           break;
