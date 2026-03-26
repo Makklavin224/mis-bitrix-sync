@@ -23,6 +23,16 @@ import 'dotenv/config';
  */
 
 const MIS_BASE = 'https://app.rnova.org/api/public';
+
+// ВСЕ стадии воронки — загружаем сделки из каждой
+const ALL_STAGES = [
+  'NEW', 'PREPARATION', 'EXECUTING', 'PREPAYMENT_INVOICE',
+  'FINAL_INVOICE', 'UC_1HMFHN', 'UC_K4NZZM', 'UC_7KB49S',
+  'UC_JLJ6EI', 'UC_QAU8BB', 'UC_OW1418', 'UC_NCW0DT',
+  'UC_LVYHC1', 'UC_F92MOY', 'WON', 'LOSE', 'APOLOGY',
+];
+
+// Терминальные — не удаляем при дедупликации (удаляем только ранние дубли)
 const CLOSED_STAGES = ['UC_NCW0DT', 'UC_F92MOY', 'WON', 'LOSE', 'APOLOGY'];
 
 const STAGE_NAMES = {
@@ -31,12 +41,18 @@ const STAGE_NAMES = {
   'EXECUTING': 'В работе',
   'PREPAYMENT_INVOICE': 'Предоплата',
   'FINAL_INVOICE': 'Записан на консультацию',
-  'UC_JLJ6EI': 'Записан на лечение',
-  'UC_7KB49S': 'Есть показания',
-  'UC_LVYHC1': 'Нет показаний',
-  'UC_QAU8BB': 'Не пришёл (лечение)',
   'UC_1HMFHN': 'Не пришёл (консультация)',
+  'UC_K4NZZM': 'UC_K4NZZM',
+  'UC_7KB49S': 'Есть показания',
+  'UC_JLJ6EI': 'Записан на лечение',
+  'UC_QAU8BB': 'Не пришёл (лечение)',
+  'UC_OW1418': 'UC_OW1418',
+  'UC_NCW0DT': 'Некачественная',
+  'UC_LVYHC1': 'Нет показаний',
   'UC_F92MOY': 'Лечение завершено',
+  'WON': 'Успех',
+  'LOSE': 'Провал',
+  'APOLOGY': 'Анализ провала',
 };
 function sn(id) { return STAGE_NAMES[id] || id; }
 
@@ -46,12 +62,19 @@ const STAGE_PRIORITY = {
   'PREPARATION': 1,
   'EXECUTING': 2,
   'PREPAYMENT_INVOICE': 3,
-  'FINAL_INVOICE': 10,         // записан на консультацию
-  'UC_1HMFHN': 11,             // не пришёл на консультацию
-  'UC_LVYHC1': 12,             // нет показаний
-  'UC_QAU8BB': 13,             // не пришёл на лечение
-  'UC_7KB49S': 14,             // есть показания к лечению
-  'UC_JLJ6EI': 15,             // записан на лечение
+  'FINAL_INVOICE': 10,
+  'UC_1HMFHN': 11,
+  'UC_K4NZZM': 12,
+  'UC_LVYHC1': 13,
+  'UC_7KB49S': 14,
+  'UC_JLJ6EI': 15,
+  'UC_QAU8BB': 16,
+  'UC_OW1418': 17,
+  'UC_NCW0DT': 20,
+  'UC_F92MOY': 21,
+  'WON': 30,
+  'LOSE': 30,
+  'APOLOGY': 30,
 };
 function stagePriority(stageId) { return STAGE_PRIORITY[stageId] ?? 5; }
 
@@ -96,7 +119,7 @@ async function getAllDeals() {
 
   while (true) {
     const res = await bitrix('crm.deal.list', {
-      filter: { CLOSED: 'N' },
+      filter: { STAGE_ID: ALL_STAGES },
       select: ['ID', 'TITLE', 'STAGE_ID', 'CONTACT_ID', 'UF_CRM_1774345475'],
       start,
     });
@@ -218,9 +241,20 @@ async function main() {
   const doctors = await loadDoctors();
   console.log(`  Загружено ${doctors.byName.size} врачей\n`);
 
-  console.log('[2/4] Загрузка открытых сделок...');
+  console.log('[2/4] Загрузка сделок из ВСЕХ стадий...');
   const allDeals = await getAllDeals();
-  console.log(`  Всего открытых сделок: ${allDeals.length}\n`);
+  console.log(`  Всего сделок: ${allDeals.length}\n`);
+
+  // Статистика по стадиям
+  const byStageStat = {};
+  for (const d of allDeals) {
+    byStageStat[d.STAGE_ID] = (byStageStat[d.STAGE_ID] || 0) + 1;
+  }
+  console.log('  По стадиям:');
+  for (const [stage, count] of Object.entries(byStageStat)) {
+    console.log(`    ${sn(stage)}: ${count}`);
+  }
+  console.log('');
 
   // 2. Группировка по контакту
   const byContact = new Map();
