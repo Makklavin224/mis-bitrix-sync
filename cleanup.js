@@ -267,113 +267,56 @@ async function main() {
   }
   console.log('');
 
-  // 2. Группировка по контакту
-  const byContact = new Map();
+  // 2. Разделяем: NEW-сделки vs остальные
+  const newDeals = [];       // сделки в стадии NEW
+  const normalDeals = [];    // сделки во всех остальных стадиях
+
   for (const deal of allDeals) {
     if (!deal.CONTACT_ID) continue;
-    if (!byContact.has(deal.CONTACT_ID)) byContact.set(deal.CONTACT_ID, []);
-    byContact.get(deal.CONTACT_ID).push(deal);
+    if (deal.STAGE_ID === 'NEW') {
+      newDeals.push(deal);
+    } else {
+      normalDeals.push(deal);
+    }
   }
-  console.log(`  Контактов с открытыми сделками: ${byContact.size}\n`);
 
-  // 3. Поиск и удаление дублей
-  console.log('[3/4] Поиск дублей...\n');
-
-  let stats = { duplicates: 0, deleted: 0, mergedProducts: 0, stageFixed: 0, dateFixed: 0 };
-
-  for (const [contactId, deals] of byContact) {
-    const activeDeals = deals.filter(d => !CLOSED_STAGES.includes(d.STAGE_ID));
-    if (activeDeals.length <= 1) continue;
-
-    // Кластеризация по врачу/специальности
-    const clusters = [];
-
-    for (const deal of activeDeals) {
-      const docName = (deal.UF_CRM_1774345475 || '').trim();
-      const docMis = docName ? doctors.byName.get(docName) : null;
-
-      let placed = false;
-      for (const cluster of clusters) {
-        const clusterDocName = (cluster[0].UF_CRM_1774345475 || '').trim();
-        const clusterDocMis = clusterDocName ? doctors.byName.get(clusterDocName) : null;
-
-        // Точное совпадение врача
-        if (docName && docName === clusterDocName) {
-          cluster.push(deal);
-          placed = true;
-          break;
-        }
-
-        // Совпадение по специальности
-        if (docMis && clusterDocMis && sharesSpecialty(doctors, docMis.id, clusterDocMis.id)) {
-          cluster.push(deal);
-          placed = true;
-          break;
-        }
-
-        // Любая из сторон без врача или в ранней стадии → объединяем
-        const EARLY = ['NEW', 'PREPARATION', 'EXECUTING', 'PREPAYMENT_INVOICE'];
-        const dealEarly = !docName || EARLY.includes(deal.STAGE_ID);
-        const clusterEarly = !clusterDocName || EARLY.includes(cluster[0].STAGE_ID);
-        if (dealEarly || clusterEarly) {
-          cluster.push(deal);
-          placed = true;
-          break;
-        }
-      }
-
-      if (!placed) {
-        clusters.push([deal]);
-      }
+  // Контакты у которых есть сделка НЕ в NEW
+  const contactsWithNormal = new Set();
+  const normalByContact = new Map(); // contactId → первая нормальная сделка (для лога)
+  for (const deal of normalDeals) {
+    contactsWithNormal.add(deal.CONTACT_ID);
+    if (!normalByContact.has(deal.CONTACT_ID)) {
+      normalByContact.set(deal.CONTACT_ID, deal);
     }
+  }
 
-    // Обработка кластеров с дублями
-    for (const cluster of clusters) {
-      if (cluster.length <= 1) continue;
+  // NEW-сделки у контактов которые уже есть в нормальных стадиях → дубли
+  const toDelete = newDeals.filter(d => contactsWithNormal.has(d.CONTACT_ID));
 
-      // Сортируем: продвинутые стадии первыми, ранние (NEW и пр.) — в конец на удаление
-      cluster.sort((a, b) => stagePriority(b.STAGE_ID) - stagePriority(a.STAGE_ID));
+  console.log(`  Сделок в NEW: ${newDeals.length}`);
+  console.log(`  Сделок в остальных стадиях: ${normalDeals.length}`);
+  console.log(`  Контактов с нормальными сделками: ${contactsWithNormal.size}`);
+  console.log(`  NEW-дублей к удалению: ${toDelete.length}\n`);
 
-      const keep = cluster[0];
-      const dups = cluster.slice(1);
-      const keepDoc = keep.UF_CRM_1774345475 || '?';
+  // 3. Удаление дублей из NEW
+  console.log('[3/4] Удаление NEW-дублей...\n');
 
-      console.log(`  Контакт ${contactId} | ${keepDoc}`);
-      console.log(`    Оставляем: #${keep.ID} "${keep.TITLE}" [${sn(keep.STAGE_ID)}]`);
+  let stats = { duplicates: toDelete.length, deleted: 0 };
 
-      for (const dup of dups) {
-        const dupDoc = dup.UF_CRM_1774345475 || '(без врача)';
-        console.log(`    Дубль:     #${dup.ID} "${dup.TITLE}" [${sn(dup.STAGE_ID)}] врач=${dupDoc}`);
-        stats.duplicates++;
+  for (let i = 0; i < toDelete.length; i++) {
+    const dup = toDelete[i];
+    const normal = normalByContact.get(dup.CONTACT_ID);
 
-        if (!DRY_RUN) {
-          // Перенести товары
-          const dupProducts = await getDealProducts(dup.ID);
-          if (dupProducts.length) {
-            const mainProducts = await getDealProducts(keep.ID);
-            const keys = new Set(mainProducts.map(p => `${p.PRODUCT_NAME}|${p.PRICE}`));
-            const newOnes = dupProducts.filter(p => !keys.has(`${p.PRODUCT_NAME}|${p.PRICE}`));
+    console.log(`  [${i + 1}/${toDelete.length}] Контакт ${dup.CONTACT_ID}`);
+    console.log(`    Оставляем: #${normal.ID} "${normal.TITLE}" [${sn(normal.STAGE_ID)}] врач=${normal.UF_CRM_1774345475 || '?'}`);
+    console.log(`    Удаляем:   #${dup.ID} "${dup.TITLE}" [Новая]`);
 
-            if (newOnes.length) {
-              const rows = [...mainProducts, ...newOnes].map(p => ({
-                PRODUCT_NAME: p.PRODUCT_NAME,
-                PRICE: parseFloat(p.PRICE) || 0,
-                QUANTITY: parseInt(p.QUANTITY) || 1,
-              }));
-              await bitrix('crm.deal.productrows.set', { id: keep.ID, rows });
-              stats.mergedProducts += newOnes.length;
-              console.log(`      -> перенесено ${newOnes.length} товаров`);
-            }
-          }
-
-          await bitrix('crm.deal.delete', { id: dup.ID });
-          stats.deleted++;
-          console.log(`      -> удалена`);
-          await sleep(300);
-        }
-      }
-      console.log('');
+    if (!DRY_RUN) {
+      await bitrix('crm.deal.delete', { id: dup.ID });
+      stats.deleted++;
+      console.log(`      -> удалена`);
     }
+    console.log('');
   }
 
   // 4. Пройтись по оставшимся сделкам: проверить стадии и даты
