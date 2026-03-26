@@ -247,7 +247,13 @@ async function main() {
   console.log(`  Загружено ${doctors.byName.size} врачей\n`);
 
   console.log('[2/4] Загрузка сделок из ВСЕХ стадий...');
-  const allDeals = await getAllDeals();
+  const rawDeals = await getAllDeals();
+
+  // Дедупликация по ID — Битрикс может вернуть одну сделку дважды
+  const allDeals = [...new Map(rawDeals.map(d => [d.ID, d])).values()];
+  if (rawDeals.length !== allDeals.length) {
+    console.log(`  ⚠ Битрикс вернул ${rawDeals.length} записей, уникальных: ${allDeals.length} (дубли API убраны)`);
+  }
   console.log(`  Всего сделок: ${allDeals.length}\n`);
 
   // Статистика по стадиям
